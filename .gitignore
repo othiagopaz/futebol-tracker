@@ -1,0 +1,23 @@
+# Ambiente virtual Python
+.venv/
+venv/
+env/
+
+# Cache do Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Modelos YOLO (baixados automaticamente na primeira execução)
+*.pt
+
+# Dados gerados em tempo de execução
+recordes.json
+
+# Vídeos e imagens de teste
+*.mov
+*.mp4
+*.png
+
+# Sistema operacional
+.DS_Store

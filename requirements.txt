@@ -1,0 +1,11 @@
+# Bibliotecas do Futebol Tracker.
+# Instale com:  pip install -r requirements.txt
+#
+# Recomendado usar Python 3.12 (mediapipe ainda não suporta 3.13+ de forma estável).
+
+opencv-python==5.0.0.93
+ultralytics==8.4.96
+numpy==2.5.1
+
+# Opcional: só para desenhar o esqueleto do corpo. O programa funciona sem ele.
+mediapipe==0.10.35
