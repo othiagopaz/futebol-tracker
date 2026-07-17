@@ -48,8 +48,9 @@ terminal — aceite.
 - **YOLO** detecta a bola (`sports ball`) em cada frame.
 - **MediaPipe Pose** desenha o corpo das pessoas.
 - **Embaixadinha**: conta cada pico do movimento da bola (sobe → desce).
-- **Passe**: conta quando a bola cruza a metade da tela (jogador esquerda ↔
-  direita) sem tocar a linha do chão.
+- **Passe**: detecta as 2 pessoas na cena (YOLO) e associa a bola ao jogador
+  mais próximo. Um passe é contado quando a bola troca de dono sem cair. Os
+  jogadores aparecem marcados (verde = está com a bola).
 - **Reset automático na queda**: sempre que a bola toca a linha do chão
   (vermelha), os contadores zeram e aparece "CAIU! ZERADO" na tela. Vale nos
   dois modos. Para desligar, coloque `RESET_AO_CAIR = False` no topo do script.
@@ -60,9 +61,10 @@ terminal — aceite.
   barras mostra as últimas 10 tentativas (a mais recente destacada em verde) e
   uma linha pontilhada dourada no valor do recorde. Ajuste quantas aparecem em
   `HISTORICO_MAX` no topo do script.
-- **Queda mais robusta**: a queda é detectada tanto quando a bola cruza a linha
-  do chão quanto quando ela some logo após estar na parte de baixo da tela
-  (caso o detector perca a bola bem na hora do quique no chão).
+- **Queda por cor do chão**: a bola é considerada caída quando fica parada e o
+  que está logo abaixo dela é o **concreto cinza** do chão (detectado por cor,
+  não por uma linha fixa). Ignora paredes/teto claros e funciona com câmera
+  frontal. A bola no chão fica marcada com um círculo vermelho.
 
 ## Recordes salvos
 
@@ -80,9 +82,11 @@ Se contar demais ou de menos, ajuste no topo de `futebol_tracker.py`:
 | `BALL_CONFIDENCE` | Confiança mínima para aceitar a bola (aumente se detectar coisas erradas) |
 | `MEMORIA_BOLA` | Frames que mantém a última posição quando o YOLO perde a bola |
 | `MIN_VERTICAL_MOVE` | Movimento mínimo para contar subida/descida (aumente se contar tremores) |
-| `ZONA_BAIXA_RATIO` | Altura da "zona de queda" (0.55 = 45% de baixo). Suba para a câmera frontal |
+| `CHAO_S_MAX` / `CHAO_V_MIN` / `CHAO_V_MAX` | Faixa de cor do chão (concreto cinza) em HSV. Recalibre se o piso mudar |
+| `CHAO_FRACAO_MIN` | Quanto da área abaixo da bola precisa ser chão para contar "no chão" |
 | `MOV_PARADA` | Quão parada a bola precisa estar (px) para contar como caída |
-| `FRAMES_PARADA_QUEDA` | Por quantos frames parada embaixo para disparar a queda |
+| `FRAMES_PARADA_QUEDA` | Por quantos frames parada sobre o chão para disparar a queda |
+| `ZONA_BAIXA_RATIO` | Só considera queda abaixo desta altura (evita paredes/teto) |
 
 ## Dicas para funcionar melhor
 

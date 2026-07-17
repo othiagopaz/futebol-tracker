@@ -56,9 +56,9 @@ except Exception:
 # computador, troque por "yolo11n.pt" (mais rápido, menos preciso).
 MODELO_YOLO = "yolo11m.pt"
 
-# Classe do YOLO que representa uma bola de esporte. No modelo COCO padrão,
-# "sports ball" é a classe de número 32.
+# Classes do YOLO no dataset COCO: 32 = "sports ball", 0 = "person".
 SPORTS_BALL_CLASS_ID = 32
+PESSOA_CLASS_ID = 0
 
 # Confiança mínima (0 a 1) para aceitar uma detecção da bola.
 # Baixamos para 0.15 porque o vídeo real mostrou que a bola em movimento
@@ -78,19 +78,25 @@ HISTORY_LEN = 12
 # subiu ou desceu, evitando contar tremores pequenos da detecção.
 MIN_VERTICAL_MOVE = 15
 
-# --- Detecção de QUEDA por "bola parada embaixo" ---
-# Com câmera frontal, a bola no chão aparece na altura dos pés, não no rodapé.
-# Por isso não usamos mais uma linha fixa: consideramos que a bola CAIU quando
-# ela fica quase parada, na metade de baixo da imagem, por alguns frames.
+# --- Detecção de QUEDA por "chão (concreto) abaixo da bola" ---
+# O cenário é fixo: chão de concreto cinza. Em vez de uma linha, detectamos a
+# COR do chão logo abaixo da bola. Se a bola está pousada, embaixo dela há
+# concreto; se está no ar (contra parede, entre as pernas), não há.
 #
-# Fração da altura a partir da qual consideramos "parte de baixo" (0.55 = 45%
-# de baixo da imagem). A bola precisa estar abaixo disso para contar queda.
-ZONA_BAIXA_RATIO = 0.55
-# Movimento máximo (em pixels) entre frames para considerar a bola "parada".
-MOV_PARADA = 25
-# Por quantos frames seguidos a bola precisa ficar parada embaixo para
-# disparar a queda (com ~15 fps, 8 frames ≈ meio segundo).
-FRAMES_PARADA_QUEDA = 8
+# O concreto é cinza: SATURAÇÃO baixa e VALOR (brilho) numa faixa média.
+# Valores medidos no vídeo real (S~11-20, V~125-161); deixamos uma margem.
+CHAO_S_MAX = 60        # saturação máxima (cinza = pouca cor)
+CHAO_V_MIN = 60        # brilho mínimo
+CHAO_V_MAX = 200       # brilho máximo (acima disso vira parede/luz branca)
+# Fração da faixa abaixo da bola que precisa ser concreto para contar "no chão".
+CHAO_FRACAO_MIN = 0.5
+# A bola também precisa estar quase parada, para não contar quando ela apenas
+# passa rente ao chão numa jogada.
+MOV_PARADA = 25        # movimento máximo (px) entre frames para "parada"
+FRAMES_PARADA_QUEDA = 8  # frames parada sobre o chão para disparar (~0.5s)
+# Segurança extra: só considera queda na metade de baixo da imagem (o teto/
+# paredes claras também são cinza, mas ficam em cima).
+ZONA_BAIXA_RATIO = 0.45
 
 # Zerar os contadores automaticamente quando a bola cair?
 # Vale para os dois modos (embaixadinha e passe). Se preferir zerar só na mão,
@@ -170,48 +176,63 @@ class ContadorEmbaixadinhas:
 
 class ContadorPasses:
     """
-    Conta passes entre o jogador da ESQUERDA e o da DIREITA da tela.
+    Conta passes entre os 2 jogadores detectados na cena.
 
-    Ideia simples: dividimos a tela ao meio. Sabemos em que lado a bola está.
-    Quando a bola muda de um lado para o outro SEM ter tocado o chão no
-    caminho, contamos +1 passe. Se ela toca o chão, cancelamos.
+    Em vez de dividir a tela ao meio (que não corresponde à posição real dos
+    jogadores), usamos as pessoas detectadas pelo YOLO. A bola "pertence" ao
+    jogador mais próximo dela. Quando o dono da bola muda de um jogador para o
+    outro SEM a bola ter caído no caminho, contamos +1 passe.
     """
+
+    # Distância máxima (fração da largura) entre bola e pessoa para a bola
+    # ser considerada "com" aquele jogador. Evita contar quando a bola está
+    # longe de todo mundo (no ar, no meio do campo).
+    DIST_MAX_RATIO = 0.35
 
     def __init__(self, largura_tela):
         self.count = 0
-        self.meio_x = largura_tela / 2
-        # Lado onde a bola estava na última vez: "esquerda" ou "direita".
-        self.lado_atual = None
-        # A bola tocou o chão desde a última troca de lado?
-        self.tocou_chao = False
+        self.largura = largura_tela
+        # Índice do jogador que está com a bola (0 ou 1), ou None.
+        self.dono_atual = None
+        # A bola caiu desde a última troca de dono?
+        self.caiu_no_caminho = False
 
-    def atualizar(self, x_bola, y_bola, linha_chao):
-        if x_bola is None:
+    def atualizar(self, x_bola, y_bola, pessoas, bola_no_chao):
+        """
+        x_bola, y_bola: centro da bola (ou None).
+        pessoas: lista de (cx, cy) com o centro de cada pessoa detectada.
+        bola_no_chao: True se a bola está pousada no chão neste frame.
+        """
+        if bola_no_chao:
+            self.caiu_no_caminho = True
+
+        if x_bola is None or len(pessoas) < 2:
+            return  # precisa da bola e de pelo menos 2 jogadores
+
+        # Qual jogador está mais perto da bola?
+        dists = [((px - x_bola) ** 2 + (py - y_bola) ** 2) ** 0.5
+                 for (px, py) in pessoas]
+        dono = min(range(len(dists)), key=lambda i: dists[i])
+
+        # A bola precisa estar razoavelmente perto desse jogador para "ser dele".
+        if dists[dono] > self.largura * self.DIST_MAX_RATIO:
+            return  # bola longe de todos: provavelmente no ar/viajando
+
+        if self.dono_atual is None:
+            self.dono_atual = dono
             return
 
-        # A bola tocou o chão? (y grande = perto do rodapé da tela)
-        if y_bola is not None and y_bola >= linha_chao:
-            self.tocou_chao = True
-
-        lado = "esquerda" if x_bola < self.meio_x else "direita"
-
-        if self.lado_atual is None:
-            self.lado_atual = lado
-            return
-
-        # A bola trocou de lado?
-        if lado != self.lado_atual:
-            if not self.tocou_chao:
-                # Passe válido: cruzou o meio sem cair.
+        # Trocou de dono => um passe aconteceu.
+        if dono != self.dono_atual:
+            if not self.caiu_no_caminho:
                 self.count += 1
-            # Reinicia o controle de chão para o próximo trajeto.
-            self.tocou_chao = False
-            self.lado_atual = lado
+            self.caiu_no_caminho = False
+            self.dono_atual = dono
 
     def reset(self):
         self.count = 0
-        self.lado_atual = None
-        self.tocou_chao = False
+        self.dono_atual = None
+        self.caiu_no_caminho = False
 
 
 # ---------------------------------------------------------------------------
@@ -286,37 +307,46 @@ class RastreadorBola:
     Cuida de tudo relacionado à posição da bola:
       - detecta a bola no frame (YOLO);
       - se o YOLO falhar por poucos frames, mantém a última posição (memória);
-      - detecta QUEDA quando a bola fica parada na parte de baixo da imagem.
+      - detecta QUEDA quando a bola fica parada COM CHÃO (concreto) abaixo dela.
 
     A posição atual fica em self.x e self.y (ou None se realmente não há bola).
     """
 
-    def __init__(self, modelo, altura_frame):
+    def __init__(self, modelo, altura_frame, largura_frame):
         self.modelo = modelo
         self.altura = altura_frame
+        self.largura = largura_frame
         # Posição "efetiva" da bola (pode vir da memória).
         self.x = None
         self.y = None
         self.raio = 12
         # É uma posição real (YOLO viu agora) ou memória (estimada)?
         self.ao_vivo = False
+        # Guarda o frame em HSV do último update, para checar a cor do chão.
+        self._hsv = None
+        # Pessoas detectadas neste frame: lista de (cx, cy).
+        self.pessoas = []
         # Memória: quantos frames faz que não vemos a bola de verdade.
         self._frames_sem_ver = MEMORIA_BOLA + 1
-        # Estado de queda: contador de frames parada embaixo.
+        # Estado de queda.
         self._frames_parada = 0
         self._y_anterior = None
-        # Trava: após uma queda, só rearmamos quando a bola voltar a subir.
-        # Evita disparar "queda" repetidamente com a bola parada no chão.
+        # Estava sobre o chão neste frame? (exposto para o HUD desenhar).
+        self.sobre_chao = False
+        # Trava: após uma queda, só rearmamos quando a bola sair do chão.
         self._queda_travada = False
 
     def atualizar(self, frame):
         """Roda o YOLO no frame e atualiza a posição da bola (com memória)."""
+        self._hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         r = self.modelo(frame, verbose=False, conf=BALL_CONFIDENCE)[0]
 
         detec = None
         melhor_conf = 0.0
+        pessoas = []
         for box in r.boxes:
-            if int(box.cls[0]) == SPORTS_BALL_CLASS_ID:
+            classe = int(box.cls[0])
+            if classe == SPORTS_BALL_CLASS_ID:
                 conf = float(box.conf[0])
                 if conf > melhor_conf:
                     melhor_conf = conf
@@ -325,49 +355,76 @@ class RastreadorBola:
                     cy = int((y1 + y2) / 2)
                     raio = int(max(x2 - x1, y2 - y1) / 2)
                     detec = (cx, cy, raio)
+            elif classe == PESSOA_CLASS_ID:
+                x1, y1, x2, y2 = box.xyxy[0]
+                pessoas.append((int((x1 + x2) / 2), int((y1 + y2) / 2)))
+
+        # Mantém no máximo as 2 pessoas maiores/mais relevantes seria ideal,
+        # mas para 2 jogadores basta guardar todas as detectadas.
+        self.pessoas = pessoas
 
         if detec is not None:
-            # Vimos a bola de verdade neste frame.
             self.x, self.y, self.raio = detec
             self.ao_vivo = True
             self._frames_sem_ver = 0
         else:
-            # Não vimos. Se faz pouco tempo, mantém a última posição (memória).
             self._frames_sem_ver += 1
             self.ao_vivo = False
             if self._frames_sem_ver > MEMORIA_BOLA:
-                self.x = self.y = None  # perdeu de vez
+                self.x = self.y = None
+
+    def _chao_abaixo(self):
+        """
+        Olha uma faixa logo ABAIXO da bola e mede quanto dela é concreto cinza
+        (saturação baixa, brilho médio). Retorna True se for majoritariamente
+        chão. É isso que distingue "bola pousada" de "bola no ar".
+        """
+        if self.x is None or self._hsv is None:
+            return False
+        cx, cy, raio = self.x, self.y, self.raio
+        y0 = min(self.altura - 1, cy + raio + 5)
+        y1 = min(self.altura, cy + raio + 40)
+        x0 = max(0, cx - 20)
+        x1 = min(self.largura, cx + 20)
+        if y1 <= y0 or x1 <= x0:
+            return False
+        reg = self._hsv[y0:y1, x0:x1]
+        mask = cv2.inRange(reg, (0, 0, CHAO_V_MIN),
+                           (179, CHAO_S_MAX, CHAO_V_MAX))
+        return (mask > 0).mean() >= CHAO_FRACAO_MIN
 
     def detectou_queda(self):
         """
         Retorna True UMA vez, no momento em que a bola é considerada caída.
-        Critério: bola presente, na parte de baixo da imagem, e quase parada
-        por FRAMES_PARADA_QUEDA frames seguidos.
+        Critério: bola parada + concreto logo abaixo dela + na metade de baixo.
         """
         y = self.y
         if y is None:
             self._frames_parada = 0
             self._y_anterior = None
+            self.sobre_chao = False
             return False
 
-        na_zona_baixa = y >= self.altura * ZONA_BAIXA_RATIO
+        self.sobre_chao = (
+            y >= self.altura * ZONA_BAIXA_RATIO and self._chao_abaixo()
+        )
 
-        # Rearma a trava quando a bola volta para cima da zona baixa (subiu).
-        if not na_zona_baixa:
+        # Rearma a trava quando a bola sai do chão (subiu / está no ar).
+        if not self.sobre_chao:
             self._queda_travada = False
 
         parada = (self._y_anterior is not None
                   and abs(y - self._y_anterior) <= MOV_PARADA)
         self._y_anterior = y
 
-        if na_zona_baixa and parada:
+        if self.sobre_chao and parada:
             self._frames_parada += 1
         else:
             self._frames_parada = 0
 
         if self._frames_parada >= FRAMES_PARADA_QUEDA and not self._queda_travada:
             self._frames_parada = 0
-            self._queda_travada = True  # não dispara de novo até a bola subir
+            self._queda_travada = True
             return True
         return False
 
@@ -649,7 +706,7 @@ def main():
     largura = int(cam.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
     altura = int(cam.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
 
-    rastreador = RastreadorBola(modelo, altura)
+    rastreador = RastreadorBola(modelo, altura, largura)
     contador_emb = ContadorEmbaixadinhas()
     contador_passes = ContadorPasses(largura)
     placar = Placar()
@@ -702,22 +759,24 @@ def main():
                 )
 
         # -------------------------------------------------------------------
-        # 3) ATUALIZAR OS CONTADORES conforme o modo
+        # 3) DETECTAR QUEDA (decide também o estado "bola no chão")
         # -------------------------------------------------------------------
-        # A "zona baixa" faz o papel de chão para o modo passe (câmera frontal).
-        zona_baixa_y = int(altura * ZONA_BAIXA_RATIO)
+        # A queda agora é decidida pela COR do chão abaixo da bola (concreto),
+        # não por uma linha fixa. detectou_queda() também atualiza
+        # rastreador.sobre_chao, usado pelo contador de passes.
+        caiu = rastreador.detectou_queda()
+
+        # -------------------------------------------------------------------
+        # 4) ATUALIZAR OS CONTADORES conforme o modo
+        # -------------------------------------------------------------------
         if modo == "embaixadinha":
             contador_emb.atualizar(y_bola)
         else:
-            contador_passes.atualizar(x_bola, y_bola, zona_baixa_y)
+            contador_passes.atualizar(x_bola, y_bola,
+                                      rastreador.pessoas, rastreador.sobre_chao)
 
-        # -------------------------------------------------------------------
-        # 3b) DETECTAR QUEDA E ZERAR (vale para os dois modos)
-        # -------------------------------------------------------------------
-        # Agora a queda é decidida pelo rastreador: bola quase parada na parte
-        # de baixo da imagem por alguns frames (funciona com câmera frontal e
-        # não depende de calibrar uma linha fixa).
-        if RESET_AO_CAIR and rastreador.detectou_queda():
+        # Zera tudo quando a bola cai.
+        if RESET_AO_CAIR and caiu:
             placar.encerrar_tentativa(modo, contagem_atual(modo))
             contador_emb.reset()
             contador_passes.reset()
@@ -726,15 +785,20 @@ def main():
             print("Bola caiu -> contadores zerados.")
 
         # -------------------------------------------------------------------
-        # 4) DESENHAR A INTERFACE (textos e linhas na tela)
+        # 5) DESENHAR A INTERFACE (marcações na cena)
         # -------------------------------------------------------------------
-        # Linha da "zona baixa": abaixo dela, uma bola parada conta como queda.
-        cv2.line(frame, (0, zona_baixa_y), (largura, zona_baixa_y), (0, 0, 200), 1)
-        cv2.putText(frame, "zona de queda", (10, zona_baixa_y - 8),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 200), 1)
-        # Linha do meio (divisão dos jogadores) só no modo passe.
+        # Marca a bola em vermelho quando ela está pousada no chão (concreto).
+        if rastreador.sobre_chao and x_bola is not None:
+            cv2.circle(frame, (x_bola, y_bola), rastreador.raio + 6, (0, 0, 255), 2)
+        # No modo passe: marca as pessoas detectadas e quem está com a bola.
         if modo == "passe":
-            cv2.line(frame, (largura // 2, 0), (largura // 2, altura), (255, 255, 0), 1)
+            for i, (px, py) in enumerate(rastreador.pessoas):
+                com_bola = (contador_passes.dono_atual == i)
+                cor = (0, 255, 0) if com_bola else (255, 200, 0)
+                cv2.circle(frame, (px, py), 14, cor, 3)
+                rotulo = f"J{i+1}" + (" (bola)" if com_bola else "")
+                cv2.putText(frame, rotulo, (px - 20, py - 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, cor, 2)
 
         # Painel de informações (HUD) com números grandes, recorde e última.
         if frames_aviso_queda > 0:
@@ -785,7 +849,8 @@ def main():
                     largura = int(cam.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
                     altura = int(cam.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
                     rastreador.altura = altura
-                    contador_passes.meio_x = largura / 2
+                    rastreador.largura = largura
+                    contador_passes.largura = largura
                     print(f"Trocado para a camera {cam_idx} ({largura}x{altura}).")
                 else:
                     # Se falhar, reabre a câmera anterior para não travar.
